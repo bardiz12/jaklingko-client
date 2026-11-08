@@ -43,6 +43,10 @@ func main() {
 	baseURLFlag := flag.String("base-url", "", "Override API base URL (or set JAKLINGKO_BASE_URL)")
 	cipherSaltFlag := flag.String("cipher-salt", "", "Override payload encryption salt (or set JAKLINGKO_CIPHER_SALT)")
 	detailSaltFlag := flag.String("detail-salt", "", "Override ticket detail encryption salt (or set JAKLINGKO_DETAIL_SALT)")
+	userAgentFlag := flag.String("user-agent", "", "Override HTTP User-Agent (or set JAKLINGKO_USER_AGENT)")
+	payFelloURL := flag.String("pay-fello", "", "Fello payment gateway URL to execute automated headless PIN payment")
+	felloPIN := flag.String("fello-pin", "", "6-digit Fello e-wallet PIN (or set JAKLINGKO_FELLO_PIN)")
+	balanceFlag := flag.Bool("balance", false, "Check e-wallet balance (e.g. Fello, OVO)")
 	flag.Parse()
 
 	isJSON := strings.ToLower(*formatFlag) == "json"
@@ -93,6 +97,9 @@ func main() {
 	}
 	if *detailSaltFlag != "" {
 		opts = append(opts, jaklingko.WithDetailSalt(*detailSaltFlag))
+	}
+	if *userAgentFlag != "" {
+		opts = append(opts, jaklingko.WithUserAgent(*userAgentFlag))
 	}
 	c := jaklingko.New(opts...)
 
@@ -146,9 +153,39 @@ func main() {
 		logMsg("[OK] Authentication successful! Session saved to %s", *sessionFile)
 	}
 
+	// Resolve Fello PIN from environment variable if not passed via flag
+	if *felloPIN == "" {
+		*felloPIN = os.Getenv("JAKLINGKO_FELLO_PIN")
+		if *felloPIN == "" {
+			*felloPIN = os.Getenv("FELLO_PIN")
+		}
+	}
+
+	// Mode 0: Headless Fello Payment Submission
+	if *payFelloURL != "" {
+		if *felloPIN == "" {
+			logMsg("[ERROR] -fello-pin (or JAKLINGKO_FELLO_PIN env) is required when using -pay-fello")
+			os.Exit(1)
+		}
+		logMsg("[Action] Submitting automated headless payment to Fello gateway...")
+		if err := c.PayFelloTicket(ctx, *payFelloURL, *felloPIN); err != nil {
+			logMsg("[FAIL] Fello payment failed: %v", err)
+			os.Exit(1)
+		}
+		logMsg("[OK] Fello payment successfully completed and verified! Ticket is now active.")
+		return
+	}
+
+	// Mode 0.1: Check Balance
+	if *balanceFlag {
+		channelPassed := isFlagPassed("channel")
+		handleBalance(ctx, c, *paymentChannel, channelPassed, isJSON, logMsg)
+		return
+	}
+
 	// Mode A: Direct Book from JSON payload string, file, or stdin
 	if *bookPayload != "" {
-		handleBookPayload(ctx, c, *bookPayload, isJSON, logMsg)
+		handleBookPayload(ctx, c, *bookPayload, *felloPIN, isJSON, logMsg)
 		return
 	}
 
@@ -258,6 +295,15 @@ func main() {
 		}
 
 		printBookingResult(bookingRes, isJSON)
+
+		if *felloPIN != "" && bookingRes.QRWebURL != "" && strings.Contains(bookingRes.QRWebURL, "fello") {
+			logMsg("\n[Action] Executing automated headless Fello payment with provided PIN...")
+			if err := c.PayFelloTicket(ctx, bookingRes.QRWebURL, *felloPIN); err != nil {
+				logMsg("[FAIL] Automated Fello payment failed: %v", err)
+				os.Exit(1)
+			}
+			logMsg("[OK] Automated Fello payment completed and verified! Ticket is now ACTIVE.")
+		}
 		return
 	}
 
@@ -310,7 +356,7 @@ func main() {
 	}
 }
 
-func handleBookPayload(ctx context.Context, c jaklingko.Client, payloadInput string, isJSON bool, logMsg func(string, ...interface{})) {
+func handleBookPayload(ctx context.Context, c jaklingko.Client, payloadInput, felloPIN string, isJSON bool, logMsg func(string, ...interface{})) {
 	var rawJSON []byte
 	var err error
 
@@ -350,6 +396,15 @@ func handleBookPayload(ctx context.Context, c jaklingko.Client, payloadInput str
 	}
 
 	printBookingResult(res, isJSON)
+
+	if felloPIN != "" && res.QRWebURL != "" && strings.Contains(res.QRWebURL, "fello") {
+		logMsg("\n[Action] Executing automated headless Fello payment with provided PIN...")
+		if err := c.PayFelloTicket(ctx, res.QRWebURL, felloPIN); err != nil {
+			logMsg("[FAIL] Automated Fello payment failed: %v", err)
+			os.Exit(1)
+		}
+		logMsg("[OK] Automated Fello payment completed and verified! Ticket is now ACTIVE.")
+	}
 }
 
 func handlePendingTickets(ctx context.Context, c jaklingko.Client, isJSON bool, logMsg func(string, ...interface{})) {
@@ -631,6 +686,10 @@ func printBookingResult(res *models.BookingResult, isJSON bool) {
 
 	if res.QRWebURL != "" {
 		fmt.Printf("Payment Web URL   : %s\n", res.QRWebURL)
+		if strings.Contains(res.QRWebURL, "fello") {
+			fmt.Println("\nTip: To pay this ticket automatically with Fello PIN, run:")
+			fmt.Printf("   jaklingko-cli -pay-fello \"%s\" -fello-pin <6-DIGIT-PIN>\n", res.QRWebURL)
+		}
 	}
 
 	if res.QRContent != "" {
@@ -638,4 +697,76 @@ func printBookingResult(res *models.BookingResult, isJSON bool) {
 		fmt.Println(res.QRContent)
 	}
 	fmt.Println("==================================================")
+}
+
+func isFlagPassed(name string) bool {
+	found := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			found = true
+		}
+	})
+	return found
+}
+
+func handleBalance(ctx context.Context, c jaklingko.Client, channelID string, specificChannel bool, isJSON bool, logMsg func(string, ...interface{})) {
+	if specificChannel {
+		logMsg("[Balance] Fetching balance for payment channel ID %s...", channelID)
+		bal, err := c.GetChannelBalance(ctx, channelID)
+		if err != nil {
+			logMsg("[FAIL] Failed to fetch channel balance: %v", err)
+			os.Exit(1)
+		}
+
+		if isJSON {
+			b, _ := json.MarshalIndent(bal, "", "  ")
+			fmt.Println(string(b))
+			return
+		}
+
+		fmt.Println("\n==================================================")
+		fmt.Printf("        Payment Channel Balance (ID: %s)\n", channelID)
+		fmt.Println("==================================================")
+		fmt.Printf("Balance: %s\n", bal.Balance)
+		fmt.Println("==================================================")
+		return
+	}
+
+	logMsg("[Balance] Fetching linked e-wallet balances...")
+	balances, err := c.GetAllBalances(ctx)
+	if err != nil {
+		logMsg("[FAIL] Failed to fetch balances: %v", err)
+		os.Exit(1)
+	}
+
+	if isJSON {
+		b, _ := json.MarshalIndent(balances, "", "  ")
+		fmt.Println(string(b))
+		return
+	}
+
+	if len(balances) == 0 {
+		fmt.Println("No e-wallet channels found.")
+		return
+	}
+
+	fmt.Printf("\n=== JakLingko Linked E-Wallet Balances (%d Found) ===\n\n", len(balances))
+	for i, b := range balances {
+		statusStr := "Linked"
+		if !b.Bound {
+			statusStr = "Not Linked"
+		} else if b.Error != "" {
+			statusStr = fmt.Sprintf("Error: %s", b.Error)
+		}
+
+		balStr := b.Balance
+		if balStr == "" {
+			balStr = "-"
+		}
+
+		fmt.Printf("[%d] Channel : %s (ID: %s)\n", i+1, b.ChannelName, b.ChannelID)
+		fmt.Printf("    Status  : %s\n", statusStr)
+		fmt.Printf("    Balance : %s\n", balStr)
+		fmt.Println("--------------------------------------------------")
+	}
 }

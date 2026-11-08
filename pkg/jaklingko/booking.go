@@ -3,6 +3,7 @@ package jaklingko
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -126,6 +127,73 @@ func (c *clientImpl) GetPaymentChannels(ctx context.Context) ([]models.PaymentCh
 	}
 
 	return result.Data, nil
+}
+
+// GetChannelBalance fetches the e-wallet balance for a specific payment channel ID (e.g. "5" for Fello).
+func (c *clientImpl) GetChannelBalance(ctx context.Context, channelID string) (*models.ChannelBalance, error) {
+	if strings.TrimSpace(channelID) == "" {
+		return nil, errors.New("channelID cannot be empty")
+	}
+
+	endpoint := fmt.Sprintf("payment/v3/channels/balance/%s", channelID)
+	respBytes, statusCode, err := c.DoRequest(ctx, http.MethodGet, endpoint, nil, false)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get channel balance: %w", err)
+	}
+
+	if statusCode != http.StatusOK {
+		var apiErr models.ApiResult[any]
+		if jsonErr := json.Unmarshal(respBytes, &apiErr); jsonErr == nil && len(apiErr.Error) > 0 {
+			return nil, fmt.Errorf("channel balance error (%s): %s", channelID, strings.Join(apiErr.Error, ", "))
+		}
+		return nil, fmt.Errorf("get channel balance (%s) returned HTTP %d: %s", channelID, statusCode, string(respBytes))
+	}
+
+	var result models.ApiResult[models.ChannelBalance]
+	if err := json.Unmarshal(respBytes, &result); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal channel balance: %w", err)
+	}
+
+	return &result.Data, nil
+}
+
+// GetAllBalances checks balances for all bound e-wallet payment channels.
+func (c *clientImpl) GetAllBalances(ctx context.Context) ([]models.ChannelBalanceInfo, error) {
+	channels, err := c.GetPaymentChannels(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get payment channels for balance lookup: %w", err)
+	}
+
+	var list []models.ChannelBalanceInfo
+	for _, ch := range channels {
+		if ch.Category != "ewallet" {
+			continue
+		}
+
+		info := models.ChannelBalanceInfo{
+			ChannelID:   ch.ID,
+			ChannelName: ch.Name,
+			Category:    ch.Category,
+			Bound:       ch.StatusBinding,
+		}
+
+		if !ch.StatusBinding {
+			info.Error = "NO_BINDING_FOUND"
+			list = append(list, info)
+			continue
+		}
+
+		bal, err := c.GetChannelBalance(ctx, ch.ID)
+		if err != nil {
+			info.Error = err.Error()
+		} else if bal != nil {
+			info.Balance = bal.Balance
+			info.BalanceUnformatted = bal.BalanceUnformatted
+		}
+		list = append(list, info)
+	}
+
+	return list, nil
 }
 
 // GetPendingTickets fetches tickets that are pending payment

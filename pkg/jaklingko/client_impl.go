@@ -21,6 +21,7 @@ type clientImpl struct {
 	baseURL      string
 	cipherSalt   string
 	detailSalt   string
+	userAgent    string
 	cipher       *crypto.CipherEngine
 	session      *models.Session
 	sessionPath  string
@@ -92,14 +93,12 @@ func (c *clientImpl) DoRequest(ctx context.Context, method, endpoint string, req
 		return nil, 0, fmt.Errorf("failed to create http request: %w", err)
 	}
 
-	// Standard JakLingko Android headers discovered via reverse engineering
+	// Standard JakLingko Android headers discovered via reverse engineering (OkHttp)
+	httpReq.Header.Set("User-Agent", c.userAgent)
 	httpReq.Header.Set("App-Version", c.appVersion)
 	httpReq.Header.Set("Device-Manufacturer", c.manufacturer)
 	httpReq.Header.Set("Device-Model", c.model)
 	httpReq.Header.Set("Accept", "application/json")
-	httpReq.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	httpReq.Header.Set("Pragma", "no-cache")
-	httpReq.Header.Set("Expires", "0")
 
 	if reqBody != nil {
 		httpReq.Header.Set("Content-Type", "application/json; charset=utf-8")
