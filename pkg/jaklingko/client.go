@@ -21,6 +21,9 @@ const (
 	// DefaultAppVersion is the target Android application version
 	DefaultAppVersion = "1.6.22"
 
+	// DefaultUserAgent is the standard OkHttp User-Agent header used by the Android app
+	DefaultUserAgent = "okhttp/4.12.0"
+
 	// PaymentChannelQRIS is the channel code for QRIS in JakLingko
 	PaymentChannelQRIS = "4"
 )
@@ -45,11 +48,14 @@ type Client interface {
 	// Ticketing & Payments
 	BookTicket(ctx context.Context, req models.BookTicketRequest) (*models.BookingResult, error)
 	GetPaymentChannels(ctx context.Context) ([]models.PaymentChannelInfo, error)
+	GetChannelBalance(ctx context.Context, channelID string) (*models.ChannelBalance, error)
+	GetAllBalances(ctx context.Context) ([]models.ChannelBalanceInfo, error)
 	GetPendingTickets(ctx context.Context) ([]models.PendingTicket, error)
 	GetActiveTickets(ctx context.Context) ([]models.ActiveTicketItem, error)
 	GetTicketDetail(ctx context.Context, ticketLongID string) (*models.TicketDetailData, error)
 	GenerateGateQR(ctx context.Context, ticketID, legID int) (*models.GateQRResult, error)
 	GenerateGateQRForTicket(ctx context.Context, ticketLongID string, legID int) ([]models.GateLegQRInfo, error)
+	PayFelloTicket(ctx context.Context, felloURL, pin string) error
 
 	// Low-level HTTP transport with transparent encryption/decryption
 	DoRequest(ctx context.Context, method, endpoint string, reqBody interface{}, encryptBody bool) ([]byte, int, error)
@@ -81,6 +87,15 @@ func WithDetailSalt(salt string) Option {
 	return func(c *clientImpl) {
 		if salt != "" {
 			c.detailSalt = salt
+		}
+	}
+}
+
+// WithUserAgent overrides the HTTP User-Agent header (default: okhttp/4.12.0)
+func WithUserAgent(ua string) Option {
+	return func(c *clientImpl) {
+		if ua != "" {
+			c.userAgent = ua
 		}
 	}
 }
@@ -133,6 +148,7 @@ func New(opts ...Option) Client {
 		baseURL:      DefaultBaseURL,
 		sessionPath:  DefaultSessionFile,
 		appVersion:   DefaultAppVersion,
+		userAgent:    DefaultUserAgent,
 		manufacturer: "Google",
 		model:        "Pixel 7",
 	}
@@ -150,6 +166,9 @@ func New(opts ...Option) Client {
 	}
 	if envDetailSalt := os.Getenv("JAKLINGKO_DETAIL_SALT"); envDetailSalt != "" && c.detailSalt == "" {
 		c.detailSalt = envDetailSalt
+	}
+	if envUA := os.Getenv("JAKLINGKO_USER_AGENT"); envUA != "" && c.userAgent == DefaultUserAgent {
+		c.userAgent = envUA
 	}
 
 	// Initialize cipher engine with configured salt (or default fallback)

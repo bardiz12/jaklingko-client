@@ -24,6 +24,23 @@ type PaymentChannelInfo struct {
 	PictureURL    string `json:"pictureUrl"`
 }
 
+// ChannelBalance represents the balance information returned by payment/v3/channels/balance/{id}
+type ChannelBalance struct {
+	Balance            string `json:"balance"`
+	BalanceUnformatted string `json:"balance_unformated"`
+}
+
+// ChannelBalanceInfo combines channel details with balance info for user display
+type ChannelBalanceInfo struct {
+	ChannelID          string `json:"channel_id"`
+	ChannelName        string `json:"channel_name"`
+	Category           string `json:"category"`
+	Bound              bool   `json:"bound"`
+	Balance            string `json:"balance,omitempty"`
+	BalanceUnformatted string `json:"balance_unformated,omitempty"`
+	Error              string `json:"error,omitempty"`
+}
+
 // QRSnapAmount represents amount details in QRIS snap response
 type QRSnapAmount struct {
 	Currency string `json:"currency"`

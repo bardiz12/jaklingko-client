@@ -10,26 +10,52 @@ A plug-and-play AI agent skill for interacting with the **JakLingko** integrated
 
 ---
 
-## 1. Quick Installation (Self-Setup for AI Agents)
+## 1. Quick Installation & Self-Update (for AI Agents)
 
-If `jaklingko-mcp` or `jaklingko-cli` is not yet installed in the current environment, execute the automated cross-platform installer:
+AI agents can verify binary presence, check version info, and automatically install or self-update `jaklingko-mcp` and `jaklingko-cli` at runtime.
 
-### Linux / macOS (One-Liner)
+### Version Inspection
+Check installed version and build metadata:
+```bash
+# Standard output
+jaklingko-cli -version
+jaklingko-mcp -version
+
+# Machine-readable JSON output
+jaklingko-cli -version -format json
+```
+
+### Automated Installation & Self-Update
+If binaries are missing or an update is needed, execute the one-liner installer. The installer detects OS and CPU architecture, downloads the latest release from GitHub, unpacks UPX-optimized binaries, atomically replaces old executables in `~/.local/bin` (or `/usr/local/bin` / `%LOCALAPPDATA%`), and preserves existing session files and tokens.
+
+#### Linux / macOS
 ```bash
 curl -fsSL https://raw.githubusercontent.com/bardiz12/jaklingko-client/main/install.sh | bash
 ```
 
-### Windows (PowerShell)
+#### Windows (PowerShell)
 ```powershell
 powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/bardiz12/jaklingko-client/main/install.ps1 | iex"
 ```
 
-The installer detects OS and architecture, downloads the latest binary release, places `jaklingko-cli` and `jaklingko-mcp` into your system `$PATH`, and verifies execution.
-
 ---
 
-## 2. MCP Server Configuration
+## 2. Configuration & Runtime Overrides
 
+Both `jaklingko-mcp` and `jaklingko-cli` support runtime customization via flags or environment variables:
+
+| Setting | Flag | Environment Variable | Default / Fallback |
+| :--- | :--- | :--- | :--- |
+| **API Gateway** | `-base-url` | `JAKLINGKO_BASE_URL` | `https://api-sapps.jaklingkoindonesia.co.id` |
+| **Cipher Salt** | `-cipher-salt` | `JAKLINGKO_CIPHER_SALT` | Built-in PBKDF2 payload salt |
+| **Detail Salt** | `-detail-salt` | `JAKLINGKO_DETAIL_SALT` | Built-in PBKDF2 detail salt |
+| **User-Agent** | `-user-agent` | `JAKLINGKO_USER_AGENT` | `okhttp/4.12.0` |
+| **Fello PIN** | `-fello-pin` | `JAKLINGKO_FELLO_PIN` / `FELLO_PIN` | — |
+| **Session Path** | `-session` | — | `~/.jaklingko-session.json` |
+| **Username / Phone** | `-user` | `JAKLINGKO_USER` / `JAKLINGKO_PHONE` | — |
+| **Password** | `-pass` | `JAKLINGKO_PASS` / `JAKLINGKO_PASSWORD` | — |
+
+### MCP Server Configuration Example
 Add the server definition to your MCP client configuration (e.g. `claude_desktop_config.json`, Cursor MCP settings, or Antigravity):
 
 ```json
@@ -42,7 +68,8 @@ Add the server definition to your MCP client configuration (e.g. `claude_desktop
       ],
       "env": {
         "JAKLINGKO_USER": "6281234567890",
-        "JAKLINGKO_PASS": "your_password"
+        "JAKLINGKO_PASS": "your_password",
+        "JAKLINGKO_FELLO_PIN": "123456"
       }
     }
   }
@@ -64,7 +91,7 @@ Add the server definition to your MCP client configuration (e.g. `claude_desktop
 
 ## 4. MCP Tools Reference
 
-The server exposes 8 modular transit tools:
+The server exposes 10 modular transit tools:
 
 ### `search_transit_locations`
 * **Description**: Search for transit stops, BRT halts, MRT/LRT/KRL train stations, or landmarks in the Jakarta metropolitan area.
@@ -116,6 +143,19 @@ The server exposes 8 modular transit tools:
 * **Description**: List payment channels supported by JakLingko.
 * **Arguments**: None.
 
+### `get_balance`
+* **Description**: Check e-wallet balance (Fello, OVO, etc.) for linked JakLingko payment channels. If `channel_id` is specified (e.g. `"5"` for Fello), returns balance for that channel; otherwise returns balances for all linked e-wallets.
+* **Arguments**:
+  * `channel_id` (string, optional): Specific payment channel ID (e.g. `"5"`). If omitted, returns all linked e-wallets.
+* **Output**: Balance details object or array of linked e-wallet balance objects.
+
+### `pay_fello_ticket`
+* **Description**: Complete an automated headless e-wallet payment for a JakLingko transit ticket using Fello and a 6-digit PIN. Automatically verifies PIN credentials with Fello and finalizes the settlement with JakLingko core API.
+* **Arguments**:
+  * `fello_url` (string, required): Fello payment gateway URL (obtained from `book_transit_ticket` result `qr_web_url` when booked with payment channel `5`).
+  * `pin` (string, required): 6-digit Fello e-wallet PIN.
+* **Output**: Status confirmation object.
+
 ---
 
 ## 5. Agent Decision Workflows
@@ -140,6 +180,14 @@ When the user asks if their QRIS payment succeeded:
 1. Call `get_active_tickets()`. If the ticket appears with status `"active"`, payment was verified!
 2. If not yet active, call `get_pending_tickets()` to check if the invoice is still awaiting settlement.
 
+### Workflow D: Automated Headless Fello Payment
+When the user wants to buy a transit ticket using their linked Fello e-wallet:
+1. Book the ticket specifying payment channel 5 (Fello): `book_transit_ticket` with `payment_channel="5"`.
+2. Inspect `qr_web_url` in the booking response.
+3. Prompt or ask user for their 6-digit Fello PIN (or use provided PIN).
+4. Call `pay_fello_ticket(fello_url, pin)`.
+5. Call `get_active_tickets(include_qr=true)` to immediately obtain the active ticket and turnstile tap-in barcode (`JLI#...`)!
+
 ---
 
 ## 6. CLI Fallback (Direct Shell Execution)
@@ -149,6 +197,18 @@ If the MCP client cannot communicate via stdio, execute commands directly via `j
 ```bash
 # Search routes
 jaklingko-cli -origin "Dukuh Atas" -destination "Monas" -format json
+
+# Check all linked e-wallet balances
+jaklingko-cli -balance -format json
+
+# Check balance for specific channel (e.g. Channel 5 for Fello)
+jaklingko-cli -balance -channel 5
+
+# Book directly with Fello channel and pay headlessly in one step
+jaklingko-cli -origin "Dukuh Atas" -destination "Bundaran HI" -book-option 1 -channel 5 -fello-pin 123456
+
+# Pay an existing Fello gateway purchase URL headlessly
+jaklingko-cli -pay-fello "https://pay-fello.fellopay.id/Api/Wallet/V1/Payment/Purchase/Request?tID=..." -fello-pin 123456
 
 # List active tickets
 jaklingko-cli -active -format json

@@ -1,6 +1,9 @@
 package jaklingko_test
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -153,10 +156,12 @@ func TestClient_ConfigOverrides(t *testing.T) {
 	os.Setenv("JAKLINGKO_BASE_URL", "https://custom-gateway.example.com")
 	os.Setenv("JAKLINGKO_CIPHER_SALT", "custom-salt-123")
 	os.Setenv("JAKLINGKO_DETAIL_SALT", "custom-detail-456")
+	os.Setenv("JAKLINGKO_USER_AGENT", "okhttp/custom-env-ua")
 	defer func() {
 		os.Unsetenv("JAKLINGKO_BASE_URL")
 		os.Unsetenv("JAKLINGKO_CIPHER_SALT")
 		os.Unsetenv("JAKLINGKO_DETAIL_SALT")
+		os.Unsetenv("JAKLINGKO_USER_AGENT")
 	}()
 
 	client := jaklingko.New(
@@ -171,9 +176,146 @@ func TestClient_ConfigOverrides(t *testing.T) {
 		jaklingko.WithBaseURL("https://explicit-gateway.example.com"),
 		jaklingko.WithCipherSalt("explicit-cipher-salt"),
 		jaklingko.WithDetailSalt("explicit-detail-salt"),
+		jaklingko.WithUserAgent("custom-explicit-ua"),
 		jaklingko.WithSessionFile(filepath.Join(t.TempDir(), ".session.json")),
 	)
 	if explicitClient == nil {
 		t.Fatalf("expected client to be initialized")
+	}
+}
+
+func TestClient_HeadersAndUserAgent(t *testing.T) {
+	var capturedUA string
+	var capturedCacheControl string
+	var capturedPragma string
+	var capturedExpires string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedUA = r.Header.Get("User-Agent")
+		capturedCacheControl = r.Header.Get("Cache-Control")
+		capturedPragma = r.Header.Get("Pragma")
+		capturedExpires = r.Header.Get("Expires")
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer server.Close()
+
+	// Default client should have okhttp/4.12.0 and NO browser cache headers
+	client := jaklingko.New(
+		jaklingko.WithBaseURL(server.URL),
+		jaklingko.WithSessionFile(filepath.Join(t.TempDir(), ".session.json")),
+	)
+
+	_, _, err := client.DoRequest(context.Background(), "GET", "test-endpoint", nil, false)
+	if err != nil {
+		t.Fatalf("DoRequest failed: %v", err)
+	}
+
+	if capturedUA != jaklingko.DefaultUserAgent {
+		t.Errorf("expected User-Agent %q, got %q", jaklingko.DefaultUserAgent, capturedUA)
+	}
+	if capturedCacheControl != "" {
+		t.Errorf("expected no Cache-Control header, got %q", capturedCacheControl)
+	}
+	if capturedPragma != "" {
+		t.Errorf("expected no Pragma header, got %q", capturedPragma)
+	}
+	if capturedExpires != "" {
+		t.Errorf("expected no Expires header, got %q", capturedExpires)
+	}
+
+	// Custom User-Agent override
+	clientCustomUA := jaklingko.New(
+		jaklingko.WithBaseURL(server.URL),
+		jaklingko.WithUserAgent("okhttp/5.0.0-alpha.12"),
+		jaklingko.WithSessionFile(filepath.Join(t.TempDir(), ".session.json")),
+	)
+	_, _, err = clientCustomUA.DoRequest(context.Background(), "GET", "test-endpoint", nil, false)
+	if err != nil {
+		t.Fatalf("DoRequest failed: %v", err)
+	}
+	if capturedUA != "okhttp/5.0.0-alpha.12" {
+		t.Errorf("expected overridden User-Agent %q, got %q", "okhttp/5.0.0-alpha.12", capturedUA)
+	}
+}
+
+func TestClient_BalanceQueries(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/payment/v3/channels/list":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{
+				"statusCode": 200,
+				"message": "Success",
+				"data": [
+					{"id": "4", "name": "QRIS", "category": "qr", "enable": true, "statusBinding": true},
+					{"id": "5", "name": "Fello", "category": "ewallet", "enable": true, "statusBinding": true},
+					{"id": "14", "name": "OVO", "category": "ewallet", "enable": true, "statusBinding": false}
+				]
+			}`))
+		case "/payment/v3/channels/balance/5":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{
+				"statusCode": 200,
+				"message": "Success",
+				"data": {
+					"balance": "Rp. 7.000,00",
+					"balance_unformated": "7000.00"
+				}
+			}`))
+		case "/payment/v3/channels/balance/14":
+			w.WriteHeader(http.StatusNotAcceptable)
+			_, _ = w.Write([]byte(`{
+				"statusCode": 406,
+				"message": "NO_BINDING_FOUND",
+				"error": ["NO_BINDING_FOUND"]
+			}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := jaklingko.New(
+		jaklingko.WithBaseURL(server.URL),
+		jaklingko.WithSessionFile(filepath.Join(t.TempDir(), ".session.json")),
+	)
+
+	// Test GetChannelBalance for Fello (5)
+	bal, err := client.GetChannelBalance(context.Background(), "5")
+	if err != nil {
+		t.Fatalf("expected GetChannelBalance to succeed, got: %v", err)
+	}
+	if bal.Balance != "Rp. 7.000,00" {
+		t.Errorf("unexpected balance: %s", bal.Balance)
+	}
+	if bal.BalanceUnformatted != "7000.00" {
+		t.Errorf("unexpected unformatted balance: %s", bal.BalanceUnformatted)
+	}
+
+	// Test GetChannelBalance for unbound OVO (14)
+	_, err = client.GetChannelBalance(context.Background(), "14")
+	if err == nil {
+		t.Errorf("expected error for unbound channel 14")
+	}
+
+	// Test GetAllBalances
+	balances, err := client.GetAllBalances(context.Background())
+	if err != nil {
+		t.Fatalf("expected GetAllBalances to succeed, got: %v", err)
+	}
+	if len(balances) != 2 {
+		t.Fatalf("expected 2 e-wallet channels, got %d", len(balances))
+	}
+
+	// Fello check
+	if balances[0].ChannelID != "5" || !balances[0].Bound || balances[0].Balance != "Rp. 7.000,00" {
+		t.Errorf("unexpected Fello balance info: %+v", balances[0])
+	}
+	// OVO check
+	if balances[1].ChannelID != "14" || balances[1].Bound || balances[1].Error != "NO_BINDING_FOUND" {
+		t.Errorf("unexpected OVO balance info: %+v", balances[1])
 	}
 }

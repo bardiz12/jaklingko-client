@@ -205,6 +205,37 @@ var toolsList = []MCPTool{
 			"properties": map[string]interface{}{},
 		},
 	},
+	{
+		Name:        "pay_fello_ticket",
+		Description: "Complete an automated headless e-wallet payment for a JakLingko transit ticket using Fello and a 6-digit PIN. Automatically verifies PIN credentials and finalizes the settlement with JakLingko core API.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"fello_url": map[string]interface{}{
+					"type":        "string",
+					"description": "Fello payment gateway URL (obtained from book_transit_ticket result QRWebURL when booked with channel 5)",
+				},
+				"pin": map[string]interface{}{
+					"type":        "string",
+					"description": "6-digit Fello e-wallet PIN. If omitted, server reads from JAKLINGKO_FELLO_PIN or FELLO_PIN environment variable.",
+				},
+			},
+			"required": []string{"fello_url"},
+		},
+	},
+	{
+		Name:        "get_balance",
+		Description: "Check e-wallet balance (Fello, OVO, etc.) for linked JakLingko payment channels. If channel_id is specified (e.g. '5' for Fello), returns balance for that channel; otherwise returns balances for all linked e-wallets.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"channel_id": map[string]interface{}{
+					"type":        "string",
+					"description": "Optional payment channel ID (e.g. '5' for Fello). If omitted, returns all linked e-wallets.",
+				},
+			},
+		},
+	},
 }
 
 type MCPServer struct {
@@ -222,6 +253,7 @@ func main() {
 	baseURLFlag := flag.String("base-url", "", "Override API base URL (or set JAKLINGKO_BASE_URL)")
 	cipherSaltFlag := flag.String("cipher-salt", "", "Override payload encryption salt (or set JAKLINGKO_CIPHER_SALT)")
 	detailSaltFlag := flag.String("detail-salt", "", "Override ticket detail encryption salt (or set JAKLINGKO_DETAIL_SALT)")
+	userAgentFlag := flag.String("user-agent", "", "Override HTTP User-Agent (or set JAKLINGKO_USER_AGENT)")
 	versionFlag := flag.Bool("version", false, "Print version information and exit")
 	flag.Parse()
 
@@ -257,6 +289,9 @@ func main() {
 	}
 	if *detailSaltFlag != "" {
 		opts = append(opts, jaklingko.WithDetailSalt(*detailSaltFlag))
+	}
+	if *userAgentFlag != "" {
+		opts = append(opts, jaklingko.WithUserAgent(*userAgentFlag))
 	}
 	client := jaklingko.New(opts...)
 
@@ -379,6 +414,10 @@ func (s *MCPServer) handleToolsCall(req *JSONRPCRequest) {
 		s.toolGenerateGateQR(ctx, req.ID, callParams.Arguments)
 	case "get_payment_channels":
 		s.toolGetPaymentChannels(ctx, req.ID)
+	case "pay_fello_ticket":
+		s.toolPayFelloTicket(ctx, req.ID, callParams.Arguments)
+	case "get_balance":
+		s.toolGetBalance(ctx, req.ID, callParams.Arguments)
 	default:
 		s.sendToolError(req.ID, fmt.Sprintf("Unknown tool: %s", callParams.Name))
 	}
@@ -650,6 +689,57 @@ func (s *MCPServer) toolGetPaymentChannels(ctx context.Context, id interface{}) 
 		return
 	}
 	s.sendToolJSON(id, channels)
+}
+
+func (s *MCPServer) toolPayFelloTicket(ctx context.Context, id interface{}, args map[string]interface{}) {
+	felloURL, _ := args["fello_url"].(string)
+	pin, _ := args["pin"].(string)
+
+	if strings.TrimSpace(pin) == "" {
+		pin = os.Getenv("JAKLINGKO_FELLO_PIN")
+		if pin == "" {
+			pin = os.Getenv("FELLO_PIN")
+		}
+	}
+
+	if strings.TrimSpace(felloURL) == "" {
+		s.sendToolError(id, "Parameter 'fello_url' is required")
+		return
+	}
+	if strings.TrimSpace(pin) == "" {
+		s.sendToolError(id, "Fello PIN is required: provide 'pin' parameter or set JAKLINGKO_FELLO_PIN environment variable")
+		return
+	}
+
+	if err := s.client.PayFelloTicket(ctx, felloURL, pin); err != nil {
+		s.sendToolError(id, fmt.Sprintf("Fello payment failed: %v", err))
+		return
+	}
+
+	s.sendToolJSON(id, map[string]interface{}{
+		"status":  "SUCCESS",
+		"message": "Fello payment successfully completed and verified. Ticket is now active.",
+	})
+}
+
+func (s *MCPServer) toolGetBalance(ctx context.Context, id interface{}, args map[string]interface{}) {
+	chID, _ := args["channel_id"].(string)
+	if strings.TrimSpace(chID) != "" {
+		bal, err := s.client.GetChannelBalance(ctx, chID)
+		if err != nil {
+			s.sendToolError(id, fmt.Sprintf("Failed to fetch balance for channel %s: %v", chID, err))
+			return
+		}
+		s.sendToolJSON(id, bal)
+		return
+	}
+
+	balances, err := s.client.GetAllBalances(ctx)
+	if err != nil {
+		s.sendToolError(id, fmt.Sprintf("Failed to fetch e-wallet balances: %v", err))
+		return
+	}
+	s.sendToolJSON(id, balances)
 }
 
 // Helpers for JSON-RPC 2.0 output
