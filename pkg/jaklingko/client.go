@@ -55,6 +55,10 @@ type Client interface {
 	GetTicketDetail(ctx context.Context, ticketLongID string) (*models.TicketDetailData, error)
 	GenerateGateQR(ctx context.Context, ticketID, legID int) (*models.GateQRResult, error)
 	GenerateGateQRForTicket(ctx context.Context, ticketLongID string, legID int) ([]models.GateLegQRInfo, error)
+	RefreshGateQR(ctx context.Context, ticketID int) (*models.GateQRResult, error)
+	ValidateGateQR(ctx context.Context, ticketID, legID int, qrString string) (*models.GateQRValidation, error)
+	WatchGateQR(ctx context.Context, ticketID, legID int, opts *WatchOptions) error
+	ResolveTapTarget(ctx context.Context, ticketLongID string, legID int) (*TapTarget, error)
 	PayFelloTicket(ctx context.Context, felloURL, pin string) error
 
 	// Ticket Transfer

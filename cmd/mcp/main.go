@@ -198,6 +198,72 @@ var toolsList = []MCPTool{
 		},
 	},
 	{
+		Name:        "refresh_gate_qr",
+		Description: "Request a fresh turnstile gate QR for an active ticket via ticket/v3/qr-activation/refresh. The mobile app regenerates QRs every 20 seconds; use watch_gate_qr to mirror that loop. Resolves ticket_long_id to the integer ticket ID automatically.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"ticket_long_id": map[string]interface{}{
+					"type":        "string",
+					"description": "Active ticket long ID (e.g. 'T-DBNEP6QDGIPD7T9HIF1G')",
+				},
+				"leg_id": map[string]interface{}{
+					"type":        "integer",
+					"description": "Optional transit leg ID used to resolve the tap direction/leg context.",
+				},
+			},
+			"required": []string{"ticket_long_id"},
+		},
+	},
+	{
+		Name:        "validate_gate_qr",
+		Description: "Validate a scanned turnstile gate QR against the JakLingko backend (ticket/v3/qr-activation/validate). Returns the raw backend result plus the derived tap direction: CHECKIN = tap-in, anything else = tap-out. The server decides the direction from the ticket's journey state.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"ticket_long_id": map[string]interface{}{
+					"type":        "string",
+					"description": "Active ticket long ID (e.g. 'T-DBNEP6QDGIPD7T9HIF1G')",
+				},
+				"qr_string": map[string]interface{}{
+					"type":        "string",
+					"description": "Scanned gate QR string (e.g. 'JLI#...')",
+				},
+				"leg_id": map[string]interface{}{
+					"type":        "integer",
+					"description": "Optional transit leg ID. If omitted, the leg is chosen from the ticket state.",
+				},
+			},
+			"required": []string{"ticket_long_id", "qr_string"},
+		},
+	},
+	{
+		Name:        "watch_gate_qr",
+		Description: "Regenerate the turnstile gate QR on a fixed interval, mirroring the mobile app's 20 second countdown. Returns one frame per cycle. Keep max_cycles small (default 1) because the call blocks for (max_cycles-1) * interval_seconds.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"ticket_long_id": map[string]interface{}{
+					"type":        "string",
+					"description": "Active ticket long ID (e.g. 'T-DBNEP6QDGIPD7T9HIF1G')",
+				},
+				"leg_id": map[string]interface{}{
+					"type":        "integer",
+					"description": "Optional transit leg ID. If omitted, the leg is chosen from the ticket state.",
+				},
+				"interval_seconds": map[string]interface{}{
+					"type":        "number",
+					"description": "Seconds between regenerations (default: 20, matching the mobile app).",
+				},
+				"max_cycles": map[string]interface{}{
+					"type":        "integer",
+					"description": "Number of QR cycles to emit (default: 1, max: 60).",
+				},
+			},
+			"required": []string{"ticket_long_id"},
+		},
+	},
+	{
 		Name:        "get_payment_channels",
 		Description: "List available payment methods supported by JakLingko (QRIS, OVO, Fello, etc.).",
 		InputSchema: map[string]interface{}{
@@ -452,6 +518,12 @@ func (s *MCPServer) handleToolsCall(req *JSONRPCRequest) {
 		s.toolGetTicketDetail(ctx, req.ID, callParams.Arguments)
 	case "generate_gate_qr":
 		s.toolGenerateGateQR(ctx, req.ID, callParams.Arguments)
+	case "refresh_gate_qr":
+		s.toolRefreshGateQR(ctx, req.ID, callParams.Arguments)
+	case "validate_gate_qr":
+		s.toolValidateGateQR(ctx, req.ID, callParams.Arguments)
+	case "watch_gate_qr":
+		s.toolWatchGateQR(ctx, req.ID, callParams.Arguments)
 	case "get_payment_channels":
 		s.toolGetPaymentChannels(ctx, req.ID)
 	case "pay_fello_ticket":
@@ -724,6 +796,115 @@ func (s *MCPServer) toolGenerateGateQR(ctx context.Context, id interface{}, args
 	}
 
 	s.sendToolJSON(id, qrs)
+}
+
+// resolveTargetArg resolves ticket_long_id/leg_id arguments into a TapTarget,
+// sending a tool error and returning false when that is not possible.
+func (s *MCPServer) resolveTargetArg(ctx context.Context, id interface{}, args map[string]interface{}) (*jaklingko.TapTarget, bool) {
+	ticketLongID, _ := args["ticket_long_id"].(string)
+	if strings.TrimSpace(ticketLongID) == "" {
+		s.sendToolError(id, "Parameter 'ticket_long_id' is required")
+		return nil, false
+	}
+
+	legID := 0
+	if l, ok := args["leg_id"].(float64); ok && l > 0 {
+		legID = int(l)
+	}
+
+	target, err := s.client.ResolveTapTarget(ctx, ticketLongID, legID)
+	if err != nil {
+		s.sendToolError(id, fmt.Sprintf("Failed to resolve ticket '%s': %v", ticketLongID, err))
+		return nil, false
+	}
+	return target, true
+}
+
+func (s *MCPServer) toolRefreshGateQR(ctx context.Context, id interface{}, args map[string]interface{}) {
+	target, ok := s.resolveTargetArg(ctx, id, args)
+	if !ok {
+		return
+	}
+
+	qr, err := s.client.RefreshGateQR(ctx, target.TicketID)
+	if err != nil {
+		s.sendToolError(id, fmt.Sprintf("Failed to refresh gate QR: %v", err))
+		return
+	}
+
+	s.sendToolJSON(id, map[string]interface{}{
+		"ticket_id": target.TicketID,
+		"legs_id":   target.LegsID,
+		"direction": target.Direction,
+		"qr":        qr,
+	})
+}
+
+func (s *MCPServer) toolValidateGateQR(ctx context.Context, id interface{}, args map[string]interface{}) {
+	qrString, _ := args["qr_string"].(string)
+	if strings.TrimSpace(qrString) == "" {
+		s.sendToolError(id, "Parameter 'qr_string' is required")
+		return
+	}
+
+	target, ok := s.resolveTargetArg(ctx, id, args)
+	if !ok {
+		return
+	}
+
+	res, err := s.client.ValidateGateQR(ctx, target.TicketID, target.LegsID, qrString)
+	if err != nil {
+		s.sendToolError(id, fmt.Sprintf("Gate QR validation failed: %v", err))
+		return
+	}
+
+	s.sendToolJSON(id, map[string]interface{}{
+		"ticket_id": target.TicketID,
+		"legs_id":   target.LegsID,
+		"result":    res.Result,
+		"direction": res.Direction,
+	})
+}
+
+func (s *MCPServer) toolWatchGateQR(ctx context.Context, id interface{}, args map[string]interface{}) {
+	target, ok := s.resolveTargetArg(ctx, id, args)
+	if !ok {
+		return
+	}
+
+	intervalSeconds := 20.0
+	if v, ok := args["interval_seconds"].(float64); ok && v > 0 {
+		intervalSeconds = v
+	}
+
+	maxCycles := 1
+	if m, ok := args["max_cycles"].(float64); ok && m > 0 {
+		maxCycles = int(m)
+	}
+	if maxCycles > 60 {
+		maxCycles = 60
+	}
+
+	var frames []jaklingko.QRFrame
+	err := s.client.WatchGateQR(ctx, target.TicketID, target.LegsID, &jaklingko.WatchOptions{
+		Interval:  time.Duration(intervalSeconds * float64(time.Second)),
+		MaxCycles: maxCycles,
+		OnFrame: func(f jaklingko.QRFrame) {
+			frames = append(frames, f)
+		},
+	})
+	if err != nil {
+		s.sendToolError(id, fmt.Sprintf("Gate QR watch failed: %v", err))
+		return
+	}
+
+	s.sendToolJSON(id, map[string]interface{}{
+		"ticket_id":        target.TicketID,
+		"legs_id":          target.LegsID,
+		"direction":        target.Direction,
+		"interval_seconds": intervalSeconds,
+		"frames":           frames,
+	})
 }
 
 func (s *MCPServer) toolGetPaymentChannels(ctx context.Context, id interface{}) {

@@ -92,7 +92,7 @@ Add the server definition to your MCP client configuration (e.g. `claude_desktop
 
 ## 4. MCP Tools Reference
 
-The server exposes 12 modular transit tools:
+The server exposes 15 modular transit tools:
 
 ### `search_transit_locations`
 * **Description**: Search for transit stops, BRT halts, MRT/LRT/KRL train stations, or landmarks in the Jakarta metropolitan area.
@@ -134,11 +134,35 @@ The server exposes 12 modular transit tools:
 * **Output**: Full itinerary legs with `leg_id`, `mode`, `agency`, `line`, origin/destination stops, and active status.
 
 ### `generate_gate_qr`
-* **Description**: Generate the official turnstile barcode (`JLI#...`) for tapping in at transit entry gates (TransJakarta BRT, MRT Jakarta, LRT, KRL).
+* **Description**: Generate the official turnstile barcode (`JLI#...`) for tapping in at transit entry gates (TransJakarta BRT, MRT Jakarta, LRT, KRL). The QR is short-lived: the mobile app regenerates it every 20 seconds.
 * **Arguments**:
   * `ticket_long_id` (string, required): Active ticket long ID.
   * `leg_id` (integer, optional): Specific transit leg ID. If omitted or 0, generates QRs for all transit legs.
-* **Output**: Array of gate QR objects containing `leg_id`, `operator`, `origin`, `destination`, `qr_string` (`JLI#...`), and expiration date.
+* **Output**: Array of gate QR objects containing `leg_id`, `operator`, `origin`, `destination`, and `qr_string` (`JLI#...`).
+
+### `refresh_gate_qr`
+* **Description**: Request a fresh gate QR for an active ticket via `ticket/v3/qr-activation/refresh`. The mobile app actually re-invokes generate every 20s, so prefer `watch_gate_qr` to mirror its behaviour.
+* **Arguments**:
+  * `ticket_long_id` (string, required): Active ticket long ID.
+  * `leg_id` (integer, optional): Leg used to resolve the tap direction context.
+* **Output**: Object with `ticket_id`, `legs_id`, `direction`, and the refreshed `qr`.
+
+### `validate_gate_qr`
+* **Description**: Validate a scanned turnstile QR against the backend (`ticket/v3/qr-activation/validate`). One endpoint serves both tap-in and tap-out; the server derives the direction from the ticket's journey state.
+* **Arguments**:
+  * `ticket_long_id` (string, required): Active ticket long ID.
+  * `qr_string` (string, required): Scanned QR string (`JLI#...`).
+  * `leg_id` (integer, optional): Leg ID; if omitted it is chosen from the ticket state.
+* **Output**: Object with `ticket_id`, `legs_id`, `result` (raw backend string, e.g. `CHECKIN`), and `direction` (`TAP_IN` when the result is `CHECKIN`, otherwise `TAP_OUT`). Failures return codes such as `INVALID_QR`, `TICKET_NOT_FOUND`, `LEGS_NOT_FOUND`, `ALREADY_USED`, `SCAN_IN_FIRST`, `SCAN_FAILED`.
+
+### `watch_gate_qr`
+* **Description**: Regenerate the gate QR on a fixed interval, mirroring the app's 20-second countdown. Returns one frame per cycle. The call blocks for `(max_cycles - 1) * interval_seconds`, so keep `max_cycles` small.
+* **Arguments**:
+  * `ticket_long_id` (string, required): Active ticket long ID.
+  * `leg_id` (integer, optional): Leg ID; if omitted it is chosen from the ticket state.
+  * `interval_seconds` (number, optional, default: `20`): Seconds between regenerations.
+  * `max_cycles` (integer, optional, default: `1`, max: `60`): Number of QR frames to emit.
+* **Output**: Object with `ticket_id`, `legs_id`, `direction`, `interval_seconds`, and `frames` (each with `cycle`, `generated`, and `qr`).
 
 ### `get_payment_channels`
 * **Description**: List payment channels supported by JakLingko.
@@ -189,7 +213,8 @@ When the user has paid and is at the station or asks for their gate barcode:
 1. Call `get_active_tickets()`.
 2. Find the active ticket matching their journey.
 3. Call `generate_gate_qr(ticket_long_id, leg_id)` to get the `JLI#...` turnstile barcode for the appropriate transit leg.
-4. Provide the QR string and remind them of the expiration time (~03:00 WIB the next day).
+4. Tell the user the QR is renewed roughly every 20 seconds; if they need a live feed, call `watch_gate_qr` (one frame per cycle) or ask them to reopen the barcode.
+5. After the user scans at the gate, call `validate_gate_qr(ticket_long_id, qr_string)` to confirm the result: `TAP_IN` when the backend returns `CHECKIN`, otherwise `TAP_OUT`.
 
 ### Workflow C: Payment Verification
 When the user asks if their QRIS payment succeeded:
@@ -251,4 +276,10 @@ jaklingko-cli -transfer-ticket "T-DBNEP6QDGIPD7T9HIF1G" -to "081234567890" -pin 
 
 # Non-interactive transfer for automation
 jaklingko-cli -transfer-ticket "T-DBNEP6QDGIPD7T9HIF1G" -to "081234567890" -yes -format json
+
+# Keep regenerating the gate QR every 20s like the mobile app
+jaklingko-cli -gate-qr "T-DBNEP6QDGIPD7T9HIF1G" -watch -qr-max-cycles 3 -format json
+
+# Validate a scanned gate QR
+jaklingko-cli -gate-qr "T-DBNEP6QDGIPD7T9HIF1G" -validate-qr "JLI#..." -format json
 ```
