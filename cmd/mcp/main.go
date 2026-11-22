@@ -31,10 +31,10 @@ type JSONRPCRequest struct {
 }
 
 type JSONRPCResponse struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      interface{}     `json:"id,omitempty"`
-	Result  interface{}     `json:"result,omitempty"`
-	Error   *JSONRPCError   `json:"error,omitempty"`
+	JSONRPC string        `json:"jsonrpc"`
+	ID      interface{}   `json:"id,omitempty"`
+	Result  interface{}   `json:"result,omitempty"`
+	Error   *JSONRPCError `json:"error,omitempty"`
 }
 
 type JSONRPCError struct {
@@ -236,6 +236,46 @@ var toolsList = []MCPTool{
 			},
 		},
 	},
+	{
+		Name:        "get_profile_by_phone",
+		Description: "Look up a registered JakLingko user by phone number (read-only). Returns user_id, name, email, phone, and language. Use this to resolve the transfer recipient before calling transfer_ticket.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"phone": map[string]interface{}{
+					"type":        "string",
+					"description": "Recipient phone number (e.g. '081234567890'). Local and +62 formats are normalized automatically.",
+				},
+			},
+			"required": []string{"phone"},
+		},
+	},
+	{
+		Name:        "transfer_ticket",
+		Description: "Transfer an active transit ticket to another registered JakLingko user. IRREVERSIBLE: the ticket leaves the sender's account. Requires confirm=true and the sender's 6-digit account PIN (from the 'pin' argument or JAKLINGKO_PIN env). Tickets already in use and self-transfers are rejected.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"ticket_long_id": map[string]interface{}{
+					"type":        "string",
+					"description": "Active ticket long ID (e.g. 'T-DBNEP6QDGIPD7T9HIF1G')",
+				},
+				"phone": map[string]interface{}{
+					"type":        "string",
+					"description": "Recipient phone number (e.g. '081234567890')",
+				},
+				"pin": map[string]interface{}{
+					"type":        "string",
+					"description": "Sender's 6-digit account PIN. If omitted, the server reads JAKLINGKO_PIN from the environment.",
+				},
+				"confirm": map[string]interface{}{
+					"type":        "boolean",
+					"description": "Must be true to acknowledge that the transfer is irreversible.",
+				},
+			},
+			"required": []string{"ticket_long_id", "phone", "confirm"},
+		},
+	},
 }
 
 type MCPServer struct {
@@ -418,6 +458,10 @@ func (s *MCPServer) handleToolsCall(req *JSONRPCRequest) {
 		s.toolPayFelloTicket(ctx, req.ID, callParams.Arguments)
 	case "get_balance":
 		s.toolGetBalance(ctx, req.ID, callParams.Arguments)
+	case "get_profile_by_phone":
+		s.toolGetProfileByPhone(ctx, req.ID, callParams.Arguments)
+	case "transfer_ticket":
+		s.toolTransferTicket(ctx, req.ID, callParams.Arguments)
 	default:
 		s.sendToolError(req.ID, fmt.Sprintf("Unknown tool: %s", callParams.Name))
 	}
@@ -539,9 +583,9 @@ func (s *MCPServer) toolGetTransitRoutes(ctx context.Context, id interface{}, ar
 
 	s.sendToolJSON(id, map[string]interface{}{
 		"query": map[string]interface{}{
-			"origin":           origin.GetDisplayName(),
-			"destination":      destination.GetDisplayName(),
-			"total_found":      len(summaries),
+			"origin":      origin.GetDisplayName(),
+			"destination": destination.GetDisplayName(),
+			"total_found": len(summaries),
 		},
 		"routes": summaries,
 	})
@@ -764,6 +808,58 @@ func (s *MCPServer) sendError(id interface{}, code int, message string) {
 	}
 	b, _ := json.Marshal(resp)
 	fmt.Println(string(b))
+}
+
+func (s *MCPServer) toolGetProfileByPhone(ctx context.Context, id interface{}, args map[string]interface{}) {
+	phone, _ := args["phone"].(string)
+	if strings.TrimSpace(phone) == "" {
+		s.sendToolError(id, "Parameter 'phone' is required")
+		return
+	}
+
+	profile, err := s.client.GetProfileByPhone(ctx, phone)
+	if err != nil {
+		s.sendToolError(id, fmt.Sprintf("Failed to look up user by phone '%s': %v", phone, err))
+		return
+	}
+
+	s.sendToolJSON(id, profile)
+}
+
+func (s *MCPServer) toolTransferTicket(ctx context.Context, id interface{}, args map[string]interface{}) {
+	ticketLongID, _ := args["ticket_long_id"].(string)
+	phone, _ := args["phone"].(string)
+	pin, _ := args["pin"].(string)
+	confirm, _ := args["confirm"].(bool)
+
+	if strings.TrimSpace(ticketLongID) == "" {
+		s.sendToolError(id, "Parameter 'ticket_long_id' is required")
+		return
+	}
+	if strings.TrimSpace(phone) == "" {
+		s.sendToolError(id, "Parameter 'phone' is required")
+		return
+	}
+	if !confirm {
+		s.sendToolError(id, "Refusing to transfer without confirm=true: this action is irreversible")
+		return
+	}
+
+	if strings.TrimSpace(pin) == "" {
+		pin = os.Getenv("JAKLINGKO_PIN")
+	}
+	if strings.TrimSpace(pin) == "" {
+		s.sendToolError(id, "A 6-digit account PIN is required: pass 'pin' or set JAKLINGKO_PIN")
+		return
+	}
+
+	result, err := s.client.TransferTicketToPhone(ctx, ticketLongID, phone, pin)
+	if err != nil {
+		s.sendToolError(id, fmt.Sprintf("Ticket transfer failed for '%s': %v", ticketLongID, err))
+		return
+	}
+
+	s.sendToolJSON(id, result)
 }
 
 func (s *MCPServer) sendToolJSON(id interface{}, data interface{}) {

@@ -1,7 +1,7 @@
 ---
 name: jaklingko
-description: Query Jakarta integrated public transit (TransJakarta BRT, MRT Jakarta, LRT, KRL Commuter Line), calculate multimodal fares, book tickets with instant QRIS payment, check pending invoices, and inspect active tickets with per-operator turnstile barcodes (JLI#...). Use when the user asks about transit in Jakarta, TransJakarta bus schedules/routes, MRT Jakarta fares, buying JakLingko tickets, checking QRIS payment strings, or getting station tap-in barcodes.
-trigger: jaklingko|transjakarta|mrt jakarta|lrt jakarta|krl jakarta|jaklingko route|jaklingko ticket|tiket jaklingko|rute transjakarta|tarif mrt|jadwal jaklingko|pesan tiket transit|qris jaklingko|turnstile jaklingko|gate qr
+description: Query Jakarta integrated public transit (TransJakarta BRT, MRT Jakarta, LRT, KRL Commuter Line), calculate multimodal fares, book tickets with instant QRIS payment, check pending invoices, inspect active tickets with per-operator turnstile barcodes (JLI#...), and transfer tickets to another JakLingko user. Use when the user asks about transit in Jakarta, TransJakarta bus schedules/routes, MRT Jakarta fares, buying JakLingko tickets, checking QRIS payment strings, getting station tap-in barcodes, or transferring a ticket.
+trigger: jaklingko|transjakarta|mrt jakarta|lrt jakarta|krl jakarta|jaklingko route|jaklingko ticket|tiket jaklingko|rute transjakarta|tarif mrt|jadwal jaklingko|pesan tiket transit|qris jaklingko|turnstile jaklingko|gate qr|transfer tiket|transfer ticket
 ---
 
 # JakLingko Transit & Ticketing Assistant Skill
@@ -51,6 +51,7 @@ Both `jaklingko-mcp` and `jaklingko-cli` support runtime customization via flags
 | **Detail Salt** | `-detail-salt` | `JAKLINGKO_DETAIL_SALT` | Built-in PBKDF2 detail salt |
 | **User-Agent** | `-user-agent` | `JAKLINGKO_USER_AGENT` | `okhttp/4.12.0` |
 | **Fello PIN** | `-fello-pin` | `JAKLINGKO_FELLO_PIN` / `FELLO_PIN` | — |
+| **Transfer PIN** | `-pin` | `JAKLINGKO_PIN` | — |
 | **Session Path** | `-session` | — | `~/.jaklingko-session.json` |
 | **Username / Phone** | `-user` | `JAKLINGKO_USER` / `JAKLINGKO_PHONE` | — |
 | **Password** | `-pass` | `JAKLINGKO_PASS` / `JAKLINGKO_PASSWORD` | — |
@@ -91,7 +92,7 @@ Add the server definition to your MCP client configuration (e.g. `claude_desktop
 
 ## 4. MCP Tools Reference
 
-The server exposes 10 modular transit tools:
+The server exposes 12 modular transit tools:
 
 ### `search_transit_locations`
 * **Description**: Search for transit stops, BRT halts, MRT/LRT/KRL train stations, or landmarks in the Jakarta metropolitan area.
@@ -156,6 +157,21 @@ The server exposes 10 modular transit tools:
   * `pin` (string, required): 6-digit Fello e-wallet PIN.
 * **Output**: Status confirmation object.
 
+### `get_profile_by_phone`
+* **Description**: Look up a registered JakLingko user by phone number (read-only). Use this to resolve the transfer recipient before calling `transfer_ticket`.
+* **Arguments**:
+  * `phone` (string, required): Recipient phone number (e.g. `"081234567890"`). Local and `+62` formats are normalized automatically.
+* **Output**: Recipient profile with `user_id`, `email`, `name`, `phone`, and `lang`.
+
+### `transfer_ticket`
+* **Description**: Transfer an active transit ticket to another registered JakLingko user. **IRREVERSIBLE**: the ticket leaves the sender's account. The server rejects self-transfers and tickets already in use.
+* **Arguments**:
+  * `ticket_long_id` (string, required): Active ticket long ID (e.g. `"T-DBNEP6QDGIPD7T9HIF1G"`).
+  * `phone` (string, required): Recipient phone number.
+  * `pin` (string, optional): Sender's 6-digit account PIN. If omitted, the server reads `JAKLINGKO_PIN`.
+  * `confirm` (boolean, required): Must be `true` to acknowledge the irreversible action.
+* **Output**: `ticket_id`, resolved `recipient` profile, and transfer `status` (`message` is `"SUCCESS"` on success).
+
 ---
 
 ## 5. Agent Decision Workflows
@@ -188,6 +204,14 @@ When the user wants to buy a transit ticket using their linked Fello e-wallet:
 4. Call `pay_fello_ticket(fello_url, pin)`.
 5. Call `get_active_tickets(include_qr=true)` to immediately obtain the active ticket and turnstile tap-in barcode (`JLI#...`)!
 
+### Workflow E: Ticket Transfer
+When the user wants to give an active ticket to someone else:
+1. Call `get_active_tickets()` and confirm the ticket is still active and not in use.
+2. Resolve the recipient with `get_profile_by_phone(phone)` and show their name so the user can confirm.
+3. Ask the user for their 6-digit account PIN (or rely on `JAKLINGKO_PIN`).
+4. Call `transfer_ticket(ticket_long_id, phone, pin, confirm=true)`.
+5. Report the status. Remind the user that the transfer is irreversible and the ticket disappears from their account.
+
 ---
 
 ## 6. CLI Fallback (Direct Shell Execution)
@@ -218,4 +242,13 @@ jaklingko-cli -ticket-detail "T-DBNEP6QDGIPD7T9HIF1G" -format json
 
 # Generate gate turnstile tap-in QR
 jaklingko-cli -gate-qr "T-DBNEP6QDGIPD7T9HIF1G" -format json
+
+# Look up a transfer recipient (read-only)
+jaklingko-cli -lookup-phone "081234567890" -format json
+
+# Transfer an active ticket to another JakLingko user (interactive confirmation)
+jaklingko-cli -transfer-ticket "T-DBNEP6QDGIPD7T9HIF1G" -to "081234567890" -pin 123456
+
+# Non-interactive transfer for automation
+jaklingko-cli -transfer-ticket "T-DBNEP6QDGIPD7T9HIF1G" -to "081234567890" -yes -format json
 ```
