@@ -12,7 +12,7 @@ A zero-dependency Go client library, command-line interface, and Model Context P
 * **Multi-Account Interface Architecture**: Each `jaklingko.Client` manages its own isolated account state, in-memory tokens, and file session.
 * **AES-256-CBC PBKDF2 Transport**: Full replication of the official Android encryption layer with PBKDF2 key derivation.
 * **Overridable Base URL & Salts**: Configurable via functional options or environment variables (`JAKLINGKO_BASE_URL`, `JAKLINGKO_CIPHER_SALT`, `JAKLINGKO_DETAIL_SALT`) with automatic built-in fallbacks.
-* **Complete Transit Flow**: Station discovery $\rightarrow$ Multimodal fare routing $\rightarrow$ Instant QRIS booking $\rightarrow$ Live turnstile gate barcode generation (`JLI#...`).
+* **Complete Transit Flow**: Station discovery → Multimodal fare routing → Instant QRIS booking → Live turnstile gate barcode generation (`JLI#...`) → Peer-to-peer ticket transfer.
 * **Stdio MCP Server**: Plug-and-play binary for Claude Desktop, Cursor, Antigravity, OpenCode, or any MCP-compatible AI agent.
 * **Ultra-Lightweight Binaries**: Automated UPX compression reduces multi-platform release binaries to minimal footprints.
 
@@ -158,6 +158,15 @@ jaklingko-cli -active -all-qr
 # Check pending invoices awaiting payment
 jaklingko-cli -pending
 
+# Look up a transfer recipient by phone (read-only)
+jaklingko-cli -lookup-phone "081234567890"
+
+# Transfer an active ticket to another JakLingko user (asks for confirmation + PIN)
+jaklingko-cli -transfer-ticket "T-DBNEP6QDGIPD7T9HIF1G" -to "081234567890"
+
+# Non-interactive transfer (e.g. automation): PIN via flag or JAKLINGKO_PIN
+jaklingko-cli -transfer-ticket "T-DBNEP6QDGIPD7T9HIF1G" -to "081234567890" -yes -format json
+
 # Output standard JSON (ideal for piping and scripting)
 jaklingko-cli -active -format json
 jaklingko-cli -ticket-detail "T-DBNEP6QDGIPD7T9HIF1G" -format json
@@ -166,6 +175,18 @@ jaklingko-cli -gate-qr "T-DBNEP6QDGIPD7T9HIF1G" -format json
 # Clear saved local session
 jaklingko-cli -logout
 ```
+
+### Ticket Transfer
+
+Ticket transfer moves an active ticket from your account to another registered JakLingko user. It is **irreversible**: once transferred, the ticket disappears from the sender's account.
+
+The flow mirrors the Android app:
+
+1. `GET auth/v3/profile/by-phone/{phone}` resolves the recipient (`user_id`, `name`, `phone`, `lang`).
+2. `POST ticket/v3/ticket/transfer` (encrypted body) sends `{pin, destination_uid, ticket_id, phone, firstname, lastname, language}`, where `ticket_id` is the ticket long ID (`T-...`).
+3. Success is reported by `message == "SUCCESS"`.
+
+Client-side guards reject transfers to your own number and tickets already in use (`in_journey` / `is_used`) before the request is sent. The PIN is the sender's 6-digit account PIN, supplied via `-pin` or `JAKLINGKO_PIN`. In `-format json` mode, `-yes` is required so an automated run cannot silently confirm an irreversible transfer.
 
 ---
 
@@ -202,6 +223,10 @@ The binary `jaklingko-mcp` is a standard JSON-RPC 2.0 stdio MCP server designed 
 | `get_ticket_detail` | `ticket_long_id` (string, required) | Retrieve full itinerary, legs, stations, and leg IDs for a ticket |
 | `generate_gate_qr` | `ticket_long_id` (string, required), `leg_id` (int, optional) | Generate turnstile tap-in barcode (`JLI#...`) for transit gates |
 | `get_payment_channels` | _(none)_ | List available payment channels |
+| `pay_fello_ticket` | `fello_url` (string, required), `pin` (string, optional) | Complete an automated headless Fello e-wallet payment |
+| `get_balance` | `channel_id` (string, optional) | Check linked e-wallet balances |
+| `get_profile_by_phone` | `phone` (string, required) | Resolve a registered user by phone before transferring a ticket |
+| `transfer_ticket` | `ticket_long_id` (string), `phone` (string), `pin` (string, optional), `confirm` (bool, required) | Transfer an active ticket to another user (irreversible) |
 
 ---
 
@@ -214,6 +239,7 @@ The binary `jaklingko-mcp` is a standard JSON-RPC 2.0 stdio MCP server designed 
 | `JAKLINGKO_BASE_URL` | `-base-url` | JakLingko Gateway API Base URL | `https://api-sapps.jaklingkoindonesia.co.id` |
 | `JAKLINGKO_CIPHER_SALT` | `-cipher-salt` | Payload encryption salt | Built-in fallback |
 | `JAKLINGKO_DETAIL_SALT` | `-detail-salt` | Ticket detail encryption salt | Built-in fallback |
+| `JAKLINGKO_PIN` | `-pin` | 6-digit account PIN for ticket transfer | _(none)_ |
 
 ---
 

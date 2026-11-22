@@ -57,6 +57,12 @@ type Client interface {
 	GenerateGateQRForTicket(ctx context.Context, ticketLongID string, legID int) ([]models.GateLegQRInfo, error)
 	PayFelloTicket(ctx context.Context, felloURL, pin string) error
 
+	// Ticket Transfer
+	GetProfileByPhone(ctx context.Context, phone string) (*models.UserByPhone, error)
+	TransferTicket(ctx context.Context, req models.TransferTicketRequest) (*models.StatusResult, error)
+	TransferTicketToProfile(ctx context.Context, ticketLongID string, recipient *models.UserByPhone, pin string) (*models.TransferResult, error)
+	TransferTicketToPhone(ctx context.Context, ticketLongID, phone, pin string) (*models.TransferResult, error)
+
 	// Low-level HTTP transport with transparent encryption/decryption
 	DoRequest(ctx context.Context, method, endpoint string, reqBody interface{}, encryptBody bool) ([]byte, int, error)
 }

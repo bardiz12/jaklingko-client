@@ -47,6 +47,11 @@ func main() {
 	payFelloURL := flag.String("pay-fello", "", "Fello payment gateway URL to execute automated headless PIN payment")
 	felloPIN := flag.String("fello-pin", "", "6-digit Fello e-wallet PIN (or set JAKLINGKO_FELLO_PIN)")
 	balanceFlag := flag.Bool("balance", false, "Check e-wallet balance (e.g. Fello, OVO)")
+	transferTicketFlag := flag.String("transfer-ticket", "", "Transfer a ticket to another JakLingko user (e.g. -transfer-ticket T-DBNEP6...)")
+	transferToFlag := flag.String("to", "", "Recipient phone number for -transfer-ticket")
+	transferPINFlag := flag.String("pin", "", "6-digit account PIN for -transfer-ticket (or set JAKLINGKO_PIN)")
+	lookupPhoneFlag := flag.String("lookup-phone", "", "Look up a JakLingko user by phone number (read-only)")
+	assumeYesFlag := flag.Bool("yes", false, "Skip the interactive confirmation prompt for -transfer-ticket")
 	flag.Parse()
 
 	isJSON := strings.ToLower(*formatFlag) == "json"
@@ -161,6 +166,11 @@ func main() {
 		}
 	}
 
+	// Resolve transfer PIN from environment variable if not passed via flag
+	if *transferPINFlag == "" {
+		*transferPINFlag = os.Getenv("JAKLINGKO_PIN")
+	}
+
 	// Mode 0: Headless Fello Payment Submission
 	if *payFelloURL != "" {
 		if *felloPIN == "" {
@@ -180,6 +190,18 @@ func main() {
 	if *balanceFlag {
 		channelPassed := isFlagPassed("channel")
 		handleBalance(ctx, c, *paymentChannel, channelPassed, isJSON, logMsg)
+		return
+	}
+
+	// Mode 0.2: Look Up a Transfer Recipient
+	if *lookupPhoneFlag != "" {
+		handleLookupPhone(ctx, c, *lookupPhoneFlag, isJSON, logMsg)
+		return
+	}
+
+	// Mode 0.3: Transfer a Ticket to Another User
+	if *transferTicketFlag != "" {
+		handleTransferTicket(ctx, c, *transferTicketFlag, *transferToFlag, *transferPINFlag, *assumeYesFlag, isJSON, logMsg)
 		return
 	}
 
@@ -769,4 +791,102 @@ func handleBalance(ctx context.Context, c jaklingko.Client, channelID string, sp
 		fmt.Printf("    Balance : %s\n", balStr)
 		fmt.Println("--------------------------------------------------")
 	}
+}
+
+// handleLookupPhone resolves a JakLingko user by phone number (read-only).
+func handleLookupPhone(ctx context.Context, c jaklingko.Client, phone string, isJSON bool, logMsg func(string, ...interface{})) {
+	logMsg("[Lookup] Searching JakLingko user for %s...", phone)
+	profile, err := c.GetProfileByPhone(ctx, phone)
+	if err != nil {
+		logMsg("[FAIL] User lookup failed: %v", err)
+		os.Exit(1)
+	}
+
+	if isJSON {
+		b, _ := json.MarshalIndent(profile, "", "  ")
+		fmt.Println(string(b))
+		return
+	}
+
+	fmt.Println("\n=== JakLingko User Lookup ===")
+	fmt.Printf("User ID  : %d\n", profile.UserID)
+	fmt.Printf("Name     : %s\n", profile.Name)
+	fmt.Printf("Phone    : %s\n", profile.Phone)
+	fmt.Printf("Email    : %s\n", profile.Email)
+	fmt.Printf("Language : %s\n", profile.Lang)
+	fmt.Println("--------------------------------------------------")
+}
+
+// handleTransferTicket transfers a ticket to another JakLingko user. The PIN is
+// the sender's account PIN; the action is irreversible, so an explicit
+// confirmation is required unless -yes is passed.
+func handleTransferTicket(ctx context.Context, c jaklingko.Client, ticketLongID, phone, pin string, assumeYes, isJSON bool, logMsg func(string, ...interface{})) {
+	if strings.TrimSpace(phone) == "" {
+		logMsg("[FAIL] -transfer-ticket requires -to <recipient_phone>")
+		os.Exit(1)
+	}
+
+	logMsg("[Lookup] Resolving recipient %s...", phone)
+	recipient, err := c.GetProfileByPhone(ctx, phone)
+	if err != nil {
+		logMsg("[FAIL] Recipient lookup failed: %v", err)
+		os.Exit(1)
+	}
+
+	if !isJSON {
+		fmt.Println("\n=== Ticket Transfer Confirmation ===")
+		fmt.Printf("Ticket    : %s\n", ticketLongID)
+		fmt.Printf("Recipient : %s (%s)\n", recipient.Name, recipient.Phone)
+		fmt.Println("This action is irreversible: the ticket will be removed from your account.")
+	}
+
+	if !assumeYes {
+		if isJSON {
+			logMsg("[FAIL] -format json requires -yes to confirm an irreversible ticket transfer")
+			os.Exit(1)
+		}
+		fmt.Print("Type 'yes' to continue: ")
+		reader := bufio.NewReader(os.Stdin)
+		input, _ := reader.ReadString('\n')
+		if strings.ToLower(strings.TrimSpace(input)) != "yes" {
+			logMsg("[CANCELLED] Ticket transfer aborted.")
+			return
+		}
+	}
+
+	if strings.TrimSpace(pin) == "" {
+		if isJSON {
+			logMsg("[FAIL] -pin (or JAKLINGKO_PIN env) is required in JSON mode")
+			os.Exit(1)
+		}
+		fmt.Print("Enter 6-digit account PIN: ")
+		reader := bufio.NewReader(os.Stdin)
+		input, _ := reader.ReadString('\n')
+		pin = strings.TrimSpace(input)
+	}
+	if strings.TrimSpace(pin) == "" {
+		logMsg("[FAIL] PIN is required to transfer a ticket")
+		os.Exit(1)
+	}
+
+	logMsg("[Transfer] Transferring ticket %s to %s (%s)...", ticketLongID, recipient.Name, recipient.Phone)
+	res, err := c.TransferTicketToProfile(ctx, ticketLongID, recipient, pin)
+	if err != nil {
+		logMsg("[FAIL] Ticket transfer failed: %v", err)
+		os.Exit(1)
+	}
+
+	if isJSON {
+		b, _ := json.MarshalIndent(res, "", "  ")
+		fmt.Println(string(b))
+		return
+	}
+
+	fmt.Println("\n==================================================")
+	fmt.Println("          Ticket Transfer Successful!             ")
+	fmt.Println("==================================================")
+	fmt.Printf("Ticket      : %s\n", res.TicketID)
+	fmt.Printf("Recipient   : %s (%s)\n", res.Recipient.Name, res.Recipient.Phone)
+	fmt.Printf("Status      : %s\n", res.Status.Message)
+	fmt.Println("==================================================")
 }

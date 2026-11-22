@@ -1,6 +1,66 @@
 package models
 
-import "strings"
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"strings"
+)
+
+// StopModes holds the transport modes served by a stop. The JakLingko API
+// returns the "modes" field either as a single string ("TRANSIT_BUS") or as an
+// array (["TRANSIT_BUS", "TRANSIT_TRAIN"]), so it needs a tolerant unmarshaler.
+// A plain string field fails on array responses and breaks every enclosing
+// StopLocation, including route and fare search results.
+type StopModes []string
+
+// UnmarshalJSON accepts a string, an array of strings, or null.
+func (m *StopModes) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		*m = nil
+		return nil
+	}
+
+	if trimmed[0] == '"' {
+		var single string
+		if err := json.Unmarshal(trimmed, &single); err != nil {
+			return fmt.Errorf("modes: %w", err)
+		}
+		if single == "" {
+			*m = nil
+			return nil
+		}
+		*m = StopModes{single}
+		return nil
+	}
+
+	var list []string
+	if err := json.Unmarshal(trimmed, &list); err != nil {
+		return fmt.Errorf("modes must be a string or an array of strings: %w", err)
+	}
+	*m = list
+	return nil
+}
+
+// MarshalJSON keeps the historical single-string representation when exactly
+// one mode is present, emits an array for multiple modes, and an empty string
+// when the field was absent (nil).
+func (m StopModes) MarshalJSON() ([]byte, error) {
+	switch {
+	case len(m) == 1:
+		return json.Marshal(m[0])
+	case m == nil:
+		return json.Marshal("")
+	default:
+		return json.Marshal([]string(m))
+	}
+}
+
+// String joins the modes into a single search-friendly string.
+func (m StopModes) String() string {
+	return strings.Join(m, " ")
+}
 
 // LocationPoint represents geo coordinates (lat, lng)
 type LocationPoint struct {
@@ -15,7 +75,7 @@ type StopLocation struct {
 	Address     string        `json:"address"`
 	Locality    string        `json:"locality"`
 	PTOName     string        `json:"pto_name"` // e.g. TJ, MRT, LRT, KCI
-	Modes       string        `json:"modes"`    // e.g. TRANSIT_BUS, TRANSIT_TRAIN
+	Modes       StopModes     `json:"modes"`    // e.g. "TRANSIT_BUS" or ["TRANSIT_BUS", "TRANSIT_TRAIN"]
 	StopCode    string        `json:"stop_code"`
 	StopCodeAlt string        `json:"stopCode"`
 	StopID      interface{}   `json:"stop_id"`
@@ -61,7 +121,7 @@ func (s *StopLocation) GetPTOName() string {
 	if s.PTOName != "" {
 		return s.PTOName
 	}
-	lbl := strings.ToUpper(s.Label + " " + s.Modes)
+	lbl := strings.ToUpper(s.Label + " " + s.Modes.String())
 	if strings.Contains(lbl, "MRT") {
 		return "MRTJ"
 	}
