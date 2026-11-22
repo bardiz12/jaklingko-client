@@ -106,6 +106,7 @@ jaklingko-client/
 │   │   ├── location.go     # Transit stops and location discovery
 │   │   ├── fare.go         # Multimodal routing and fare calculation
 │   │   ├── booking.go      # Ticket booking, active tickets & turnstile QRs
+│   │   ├── qr.go           # Gate QR refresh, validation, tap direction & watch loop
 │   │   └── session.go      # Session persistence (0600 file permissions)
 │   ├── crypto/             # AES-256-CBC & PBKDF2 cipher engine
 │   └── models/             # Request/response DTO structures
@@ -152,6 +153,15 @@ jaklingko-cli -gate-qr "T-DBNEP6QDGIPD7T9HIF1G"
 # Generate turnstile gate QR for a specific leg ID
 jaklingko-cli -gate-qr "T-DBNEP6QDGIPD7T9HIF1G" -leg-id 20729890
 
+# Keep regenerating the gate QR every 20s, like the mobile app (Ctrl+C to stop)
+jaklingko-cli -gate-qr "T-DBNEP6QDGIPD7T9HIF1G" -watch
+
+# Watch for a bounded number of cycles with a custom interval
+jaklingko-cli -gate-qr "T-DBNEP6QDGIPD7T9HIF1G" -watch -qr-max-cycles 5 -qr-interval 20s
+
+# Validate a scanned gate QR (tap-in/tap-out direction is decided server-side)
+jaklingko-cli -gate-qr "T-DBNEP6QDGIPD7T9HIF1G" -validate-qr "JLI#..."
+
 # Bulk active tickets inspection with all gate QRs generated
 jaklingko-cli -active -all-qr
 
@@ -188,6 +198,29 @@ The flow mirrors the Android app:
 
 Client-side guards reject transfers to your own number and tickets already in use (`in_journey` / `is_used`) before the request is sent. The PIN is the sender's 6-digit account PIN, supplied via `-pin` or `JAKLINGKO_PIN`. In `-format json` mode, `-yes` is required so an automated run cannot silently confirm an irreversible transfer.
 
+### Gate QR Lifecycle
+
+The mobile app (v1.6.22) treats a turnstile QR as short-lived: `TicketQrFragment`,
+`ScanTicketActivity` and `ABTQRCodeActivity` each run a `CountDownTimer(20000L, 1000L)`
+and request a new QR when it expires. The SDK mirrors this with
+`DefaultQRRefreshInterval = 20 * time.Second`.
+
+| Step | Endpoint | Body | Notes |
+|------|----------|------|-------|
+| Generate | `POST ticket/v3/qr-activation/generate` | `{"ticket_id":N,"legs_id":N}` | Used for the first QR and for every regeneration |
+| Refresh | `POST ticket/v3/qr-activation/refresh` | `{"ticket_id":N}` | Declared in the app's Retrofit interface but unused in v1.6.22 |
+| Validate | `POST ticket/v3/qr-activation/validate` | `{"ticket_id":N,"legs_id":N,"qr_string":"..."}` | Single endpoint for both tap-in and tap-out |
+
+Validation returns a direction string: `CHECKIN` means tap-in, any other value
+means tap-out. The app never compares against a tap-out constant, and the server
+derives the direction from the ticket's journey state (`in_journey`), so the
+client should treat the direction as advisory. Failures surface codes such as
+`INVALID_QR`, `TICKET_NOT_FOUND`, `LEGS_NOT_FOUND`, `ALREADY_USED`,
+`SCAN_IN_FIRST` and `SCAN_FAILED`.
+
+`ResolveTapTarget` picks the ticket/leg pair automatically: the next unpassed
+transit leg for a tap-in, or the leg currently in journey for a tap-out.
+
 ---
 
 ## Model Context Protocol (MCP) Server
@@ -222,6 +255,9 @@ The binary `jaklingko-mcp` is a standard JSON-RPC 2.0 stdio MCP server designed 
 | `get_active_tickets` | `include_qr` (bool, optional) | Retrieve list of active paid transit tickets |
 | `get_ticket_detail` | `ticket_long_id` (string, required) | Retrieve full itinerary, legs, stations, and leg IDs for a ticket |
 | `generate_gate_qr` | `ticket_long_id` (string, required), `leg_id` (int, optional) | Generate turnstile tap-in barcode (`JLI#...`) for transit gates |
+| `refresh_gate_qr` | `ticket_long_id` (string, required), `leg_id` (int, optional) | Request a fresh gate QR via `qr-activation/refresh` |
+| `validate_gate_qr` | `ticket_long_id`, `qr_string` (required), `leg_id` (optional) | Validate a scanned gate QR; returns raw result + `TAP_IN`/`TAP_OUT` |
+| `watch_gate_qr` | `ticket_long_id` (required), `leg_id`, `interval_seconds` (default 20), `max_cycles` (default 1) | Regenerate the gate QR on the app's 20s cycle and return every frame |
 | `get_payment_channels` | _(none)_ | List available payment channels |
 | `pay_fello_ticket` | `fello_url` (string, required), `pin` (string, optional) | Complete an automated headless Fello e-wallet payment |
 | `get_balance` | `channel_id` (string, optional) | Check linked e-wallet balances |

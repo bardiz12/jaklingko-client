@@ -171,9 +171,14 @@ type TicketDetailData struct {
 	} `json:"itineraries"`
 }
 
-// GateQRResult represents the QR barcode string for tapping in at transit turnstiles
+// GateQRResult represents the QR barcode string for tapping in or out at
+// transit turnstiles, as returned by ticket/v3/qr-activation/generate and
+// .../refresh.
 type GateQRResult struct {
-	QRString    string `json:"qr_string"`
+	QRString string `json:"qr_string"`
+	// Deprecated: the Android response model for gate QR activation (df.e)
+	// exposes only qr_string, so ExpiredDate is not populated by the current
+	// API. Treat the QR as valid for DefaultQRRefreshInterval instead.
 	ExpiredDate string `json:"expired_date"`
 }
 

@@ -38,6 +38,10 @@ func main() {
 	ticketDetailFlag := flag.String("ticket-detail", "", "View detailed itinerary, stations, and legs for a specific ticket (e.g. -ticket-detail T-DBNEP6...)")
 	gateQRFlag := flag.String("gate-qr", "", "Generate turnstile gate tap-in QR for a specific ticket (e.g. -gate-qr T-DBNEP6...)")
 	legIDFlag := flag.Int("leg-id", 0, "Specific transit leg ID for gate QR generation (optional, default: all transit legs)")
+	watchQRFlag := flag.Bool("watch", false, "Continuously regenerate the gate QR like the mobile app (use with -gate-qr)")
+	qrIntervalFlag := flag.Duration("qr-interval", jaklingko.DefaultQRRefreshInterval, "Gate QR regeneration interval when -watch is set")
+	qrMaxCycles := flag.Int("qr-max-cycles", 0, "Stop -watch after N QR cycles (0 = run until interrupted)")
+	validateQRFlag := flag.String("validate-qr", "", "Validate a scanned gate QR string (use with -gate-qr <ticket_long_id> and optional -leg-id)")
 	allQRFlag := flag.Bool("all-qr", false, "Also generate turnstile gate QRs for all tickets when listing active tickets (-active)")
 	paymentChannel := flag.String("channel", jaklingko.PaymentChannelQRIS, "Payment channel ID (default: 4 for QRIS)")
 	baseURLFlag := flag.String("base-url", "", "Override API base URL (or set JAKLINGKO_BASE_URL)")
@@ -83,7 +87,15 @@ func main() {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	// Watch mode runs until interrupted unless a cycle cap is set, so it must not
+	// inherit the short default request timeout.
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if *watchQRFlag && *gateQRFlag != "" && *qrMaxCycles <= 0 {
+		ctx, cancel = context.WithCancel(context.Background())
+	} else {
+		ctx, cancel = context.WithTimeout(context.Background(), 60*time.Second)
+	}
 	defer cancel()
 
 	if !isJSON {
@@ -223,9 +235,15 @@ func main() {
 		return
 	}
 
+	// Mode D: Validate a scanned turnstile gate QR
+	if *validateQRFlag != "" {
+		handleValidateQR(ctx, c, *gateQRFlag, *validateQRFlag, *legIDFlag, isJSON, logMsg)
+		return
+	}
+
 	// Mode D: Generate Turnstile Gate QR
 	if *gateQRFlag != "" {
-		handleGateQR(ctx, c, *gateQRFlag, *legIDFlag, isJSON, logMsg)
+		handleGateQR(ctx, c, *gateQRFlag, *legIDFlag, *watchQRFlag, *qrIntervalFlag, *qrMaxCycles, isJSON, logMsg)
 		return
 	}
 
@@ -653,32 +671,107 @@ func handleTicketDetail(ctx context.Context, c jaklingko.Client, ticketLongID st
 	}
 }
 
-func handleGateQR(ctx context.Context, c jaklingko.Client, ticketLongID string, legID int, isJSON bool, logMsg func(string, ...interface{})) {
-	logMsg("[Gate QR] Generating turnstile gate barcode for ticket %s (Leg ID: %d)...", ticketLongID, legID)
-	qrs, err := c.GenerateGateQRForTicket(ctx, ticketLongID, legID)
+func handleGateQR(ctx context.Context, c jaklingko.Client, ticketLongID string, legID int, watch bool, interval time.Duration, maxCycles int, isJSON bool, logMsg func(string, ...interface{})) {
+	if !watch {
+		logMsg("[Gate QR] Generating turnstile gate barcode for ticket %s (Leg ID: %d)...", ticketLongID, legID)
+		qrs, err := c.GenerateGateQRForTicket(ctx, ticketLongID, legID)
+		if err != nil {
+			logMsg("[FAIL] Failed to generate turnstile gate QR: %v", err)
+			os.Exit(1)
+		}
+
+		if isJSON {
+			b, _ := json.MarshalIndent(qrs, "", "  ")
+			fmt.Println(string(b))
+			return
+		}
+
+		fmt.Printf("\n=== Turnstile Gate QR (%d Generated) ===\n\n", len(qrs))
+		for _, gq := range qrs {
+			fmt.Printf("[%d] Operator    : %s (Leg #%d, Leg ID: %d)\n", gq.LegIndex, gq.Operator, gq.LegIndex, gq.LegID)
+			fmt.Printf("    Route       : %s -> %s\n", gq.Origin, gq.Destination)
+			if gq.Line != "" {
+				fmt.Printf("    Line/Route  : %s\n", gq.Line)
+			}
+			fmt.Printf("    QR String   : %s\n", gq.QR.QRString)
+			if gq.QR.ExpiredDate != "" {
+				fmt.Printf("    Valid Until : %s\n", gq.QR.ExpiredDate)
+			}
+			fmt.Printf("    Gate Action : Tap-in at %s entry turnstile gate\n", gq.Operator)
+			fmt.Println()
+		}
+		fmt.Println("--------------------------------------------------")
+		return
+	}
+
+	target, err := c.ResolveTapTarget(ctx, ticketLongID, legID)
 	if err != nil {
-		logMsg("[FAIL] Failed to generate turnstile gate QR: %v", err)
+		logMsg("[FAIL] Failed to resolve ticket %s: %v", ticketLongID, err)
+		os.Exit(1)
+	}
+
+	logMsg("[Gate QR] Watching ticket %s (leg %d, direction %s), refreshing every %s (Ctrl+C to stop)...",
+		ticketLongID, target.LegsID, target.Direction, interval)
+
+	var frames []jaklingko.QRFrame
+	err = c.WatchGateQR(ctx, target.TicketID, target.LegsID, &jaklingko.WatchOptions{
+		Interval:  interval,
+		MaxCycles: maxCycles,
+		OnFrame: func(f jaklingko.QRFrame) {
+			if isJSON {
+				frames = append(frames, f)
+				return
+			}
+			fmt.Printf("\n=== Gate QR Cycle %d (%s) ===\n", f.Cycle, f.Generated.Format(time.RFC3339))
+			if f.Err != nil {
+				fmt.Printf("Error      : %v\n", f.Err)
+				return
+			}
+			fmt.Printf("Direction  : %s\n", target.Direction)
+			fmt.Printf("Leg        : %d (%s)\n", target.LegsID, target.Mode)
+			fmt.Printf("QR String  : %s\n", f.QR.QRString)
+		},
+	})
+
+	if isJSON {
+		b, _ := json.MarshalIndent(frames, "", "  ")
+		fmt.Println(string(b))
+	}
+
+	if err != nil {
+		logMsg("[FAIL] Gate QR watch stopped: %v", err)
+		os.Exit(1)
+	}
+}
+
+func handleValidateQR(ctx context.Context, c jaklingko.Client, ticketLongID, qrString string, legID int, isJSON bool, logMsg func(string, ...interface{})) {
+	if strings.TrimSpace(ticketLongID) == "" {
+		logMsg("[FAIL] -validate-qr requires -gate-qr <ticket_long_id> to identify the ticket")
+		os.Exit(1)
+	}
+
+	target, err := c.ResolveTapTarget(ctx, ticketLongID, legID)
+	if err != nil {
+		logMsg("[FAIL] Failed to resolve ticket %s: %v", ticketLongID, err)
+		os.Exit(1)
+	}
+
+	logMsg("[Validate] Submitting gate QR for ticket %s (leg %d)...", ticketLongID, target.LegsID)
+	res, err := c.ValidateGateQR(ctx, target.TicketID, target.LegsID, qrString)
+	if err != nil {
+		logMsg("[FAIL] Gate QR validation failed: %v", err)
 		os.Exit(1)
 	}
 
 	if isJSON {
-		b, _ := json.MarshalIndent(qrs, "", "  ")
+		b, _ := json.MarshalIndent(res, "", "  ")
 		fmt.Println(string(b))
 		return
 	}
 
-	fmt.Printf("\n=== Turnstile Gate QR (%d Generated) ===\n\n", len(qrs))
-	for _, gq := range qrs {
-		fmt.Printf("[%d] Operator    : %s (Leg #%d, Leg ID: %d)\n", gq.LegIndex, gq.Operator, gq.LegIndex, gq.LegID)
-		fmt.Printf("    Route       : %s -> %s\n", gq.Origin, gq.Destination)
-		if gq.Line != "" {
-			fmt.Printf("    Line/Route  : %s\n", gq.Line)
-		}
-		fmt.Printf("    QR String   : %s\n", gq.QR.QRString)
-		fmt.Printf("    Valid Until : %s\n", gq.QR.ExpiredDate)
-		fmt.Printf("    Gate Action : Tap-in at %s entry turnstile gate\n", gq.Operator)
-		fmt.Println()
-	}
+	fmt.Println("\n=== Gate QR Validation ===")
+	fmt.Printf("Result     : %s\n", res.Result)
+	fmt.Printf("Direction  : %s\n", res.Direction)
 	fmt.Println("--------------------------------------------------")
 }
 
